@@ -5,11 +5,16 @@ from sklearn.preprocessing import StandardScaler
 
 from .config import DatasetConfig
 from .contracts import HyperspectralScene, PreparedScene
+from .splitting import StratifiedTrainTestSplitter
 
 
 class PaviaUDataModule:
     def __init__(self, config: DatasetConfig):
         self.config = config
+        self.splitter = StratifiedTrainTestSplitter(
+            training_ratio=config.training_ratio,
+            random_seed=config.random_seed,
+        )
 
     def load(self) -> HyperspectralScene:
         data_container = sio.loadmat(self.config.data_path)
@@ -25,47 +30,25 @@ class PaviaUDataModule:
         valid_indices = np.flatnonzero(flattened_labels > 0)
         valid_spectra = flattened_spectra[valid_indices]
         valid_labels = flattened_labels[valid_indices]
+        split = self.splitter.split(valid_labels)
 
-        standardized_spectra = StandardScaler().fit_transform(valid_spectra)
+        scaler = StandardScaler().fit(valid_spectra[split.training_indices])
+        standardized_spectra = scaler.transform(valid_spectra)
         pca = PCA(n_components=int(self.config.pca_components))
-        spectral_features = pca.fit_transform(standardized_spectra)
-        training_mask, testing_mask, classes = self._stratified_partition(valid_labels)
+        pca.fit(standardized_spectra[split.training_indices])
+        spectral_features = pca.transform(standardized_spectra)
 
         return PreparedScene(
             spectral_features=spectral_features,
             labels=valid_labels,
             valid_indices=valid_indices,
-            training_mask=training_mask,
-            testing_mask=testing_mask,
+            training_mask=split.training_mask,
+            testing_mask=split.testing_mask,
             height=height,
             width=width,
-            classes=classes,
+            classes=np.unique(valid_labels),
             explained_variance_ratio=float(np.sum(pca.explained_variance_ratio_)),
         )
-
-    def _stratified_partition(self, labels):
-        classes = np.unique(labels)
-        training_indices = []
-        testing_indices = []
-        random_generator = None
-        if self.config.random_seed is not None:
-            random_generator = np.random.default_rng(self.config.random_seed)
-
-        for class_label in classes:
-            class_indices = np.flatnonzero(labels == class_label)
-            if random_generator is None:
-                np.random.shuffle(class_indices)
-            else:
-                random_generator.shuffle(class_indices)
-            training_count = max(1, int(self.config.training_ratio * len(class_indices)))
-            training_indices.extend(class_indices[:training_count])
-            testing_indices.extend(class_indices[training_count:])
-
-        training_mask = np.zeros(len(labels), dtype=bool)
-        testing_mask = np.zeros(len(labels), dtype=bool)
-        training_mask[training_indices] = True
-        testing_mask[testing_indices] = True
-        return training_mask, testing_mask, classes
 
     @staticmethod
     def _resolve_array(container, preferred_keys):
